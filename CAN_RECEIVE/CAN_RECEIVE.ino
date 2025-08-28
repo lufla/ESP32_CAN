@@ -18,11 +18,12 @@ void setup() {
 }
 
 void loop() {
-  // 1. Create a CAN frame to store incoming data
   CAN_Frame rxFrame;
+  // Call the new non-blocking function
+  CAN_Read_Status status = can.readFrame(rxFrame);
 
-  // 2. Try to receive a frame
-  if (can.receiveFrame(rxFrame)) {
+  // Check the status to see if a message was received
+  if (status == CAN_READ_MSG_OK) {
     Serial.println("--- Frame Received! ---");
     Serial.printf("ID: 0x%X\n", rxFrame.id);
     Serial.printf("DLC: %d\n", rxFrame.dlc);
@@ -31,5 +32,9 @@ void loop() {
       Serial.printf("0x%02X ", rxFrame.data[i]);
     }
     Serial.println("\n-----------------------\n");
+  } else if (status == CAN_READ_ERROR) {
+    Serial.printf("Frame error detected! REC: %d\n", can.rec);
   }
+  
+  // Since readFrame() is non-blocking, your loop can do other things here!
 }

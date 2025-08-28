@@ -1,20 +1,22 @@
-# ESP32-CAN - A Software CAN Library for the ESP32 Family
+# ESP32- A Software CAN Library for the ESP32 Family
 
-A simple, lightweight, and educational CAN communication library for the **entire ESP32 family**. This library does **not** use the built-in hardware CAN (TWAI) controller. Instead, it manually implements the CAN protocol's logic on standard GPIO pins, a technique known as "bit-banging."
+A feature-complete, lightweight, and educational CAN communication library for the **entire ESP32 family**. This library does **not** use the built-in hardware CAN (TWAI) controller. Instead, it manually implements the CAN protocol's logic on standard GPIO pins, a technique known as "bit-banging."
 
-This approach makes it compatible with virtually any ESP32 board, as it only requires two available GPIO pins.
+This approach makes it compatible with virtually any ESP32 board, as it only requires two available GPIO pins. This version is a robust implementation that includes **arbitration, a full error state machine, CRC validation, and active acknowledgement**.
 
-> **⚠️ Disclaimer: For Educational Use Only**
-> This library was created to demonstrate the low-level workings of the CAN 2.0A protocol. It is **not** suitable for production, commercial, or mission-critical applications. It lacks crucial features like bus arbitration, robust error handling, and proper message validation, which are essential for reliable CAN communication. For any real-world application, please use a library that leverages the ESP32's built-in hardware CAN (TWAI) controller.
+> **⚠️ Disclaimer: For Experimental and Low-Speed Use**
+> This library was created to provide a fully-featured CAN implementation for educational and experimental purposes. While it implements the core logic of the CAN standard, software-based timing (bit-banging) is inherently less precise than a dedicated hardware controller. It is **not recommended for high-speed or mission-critical applications**. For reliable, high-speed communication, please use a library that leverages the ESP32's built-in hardware CAN (TWAI) controller.
 
 ---
 
 ## Features
--   **Universal ESP32 Compatibility:** Works with any board in the ESP32 family (ESP32, ESP32-S2, ESP32-C3, etc.).
+-   **Universal ESP32 Compatibility:** Works with any board in the ESP32 family.
 -   **Flexible Pin Assignment:** Use any two available GPIO pins for RX and TX.
+-   **Collision Detection & Arbitration:** Sender detects higher-priority messages and will safely abort transmission if it loses arbitration.
+-   **Full Error State Machine:** Tracks Transmit/Receive Error Counters (TEC/REC) and transitions between **Error-Active**, **Error-Passive**, and **Bus-Off** states.
+-   **CRC Validation & Active ACK:** The receiver validates the CRC of incoming messages and actively sends an Acknowledge (ACK) bit for valid frames.
+-   **Non-Blocking Read:** The `readFrame()` function is non-blocking, allowing your main loop to run freely without getting stuck.
 -   **Hardware Independent:** Does not rely on the built-in TWAI peripheral.
--   **Lightweight:** Minimal footprint with no complex dependencies.
--   **Educational:** A great tool for learning the fundamentals of the CAN protocol.
 
 ---
 
@@ -22,7 +24,7 @@ This approach makes it compatible with virtually any ESP32 board, as it only req
 To use this library, you need **two** of the following setups, one for sending and one for receiving:
 
 1.  **Any ESP32 Board:** The library is compatible with the entire ESP32 family.
-2.  **An External CAN Transceiver (Mandatory):** You **must** use a dedicated CAN transceiver module (e.g., **MCP2551**, **TJA1050**). You cannot connect the ESP32's GPIO pins directly to a CAN bus. The transceiver is responsible for converting the logic-level signals to the differential signals (CAN_H and CAN_L) required by the CAN standard.
+2.  **An External CAN Transceiver (Mandatory):** You **must** use a dedicated CAN transceiver module (e.g., **MCP2551**, **TJA1050**).
 
 ### Wiring Diagram
 ```
@@ -53,88 +55,58 @@ GPIO Pin (RX) |--------------|-- RXD --|                |-- CAN_L ---< CAN Bus >
 #include <ESP_CAN.h>
 ```
 
-### 2. Constructor
-Create a CAN object by specifying your chosen RX and TX pins.
+### 2. Constructor & Public State
+You can monitor the node's health via public variables.
 ```cpp
 ESP_CAN can(int rxPin, int txPin);
 
-// Example:
-ESP_CAN can(GPIO_NUM_5, GPIO_NUM_4); // RX on GPIO 5, TX on GPIO 4
+// Monitor these in your code:
+uint8_t tec = can.tec; // Transmit Error Counter
+uint8_t rec = can.rec; // Receive Error Counter
+CAN_State state = can.state; // ERROR_ACTIVE, ERROR_PASSIVE, or BUS_OFF
 ```
 
 ### 3. begin()
-Initialize the library and set the CAN bus speed. This should be called in your `setup()` function.
 ```cpp
 void begin(long baudrate);
 ```
-**Supported Baud Rates:**
-The CAN protocol requires all nodes on the bus to operate at the same speed. Common baud rates include:
--   `1000000` (1 Mbps)
--   `500000`  (500 kbps)
--   `250000`  (250 kbps)
--   `125000`  (125 kbps)
--   `100000`  (100 kbps)
--   `50000`   (50 kbps)
 
-**Example:**
-```cpp
-void setup() {
-  // Start CAN communication at 125 kbps
-  can.begin(125000);
-}
-```
-
-### 4. The `CAN_Frame` Struct
-This library uses a simple struct to hold message data for both sending and receiving.
-```cpp
-struct CAN_Frame {
-  uint32_t id;      // 11-bit CAN Identifier (e.g., 0x123)
-  uint8_t dlc;      // Data Length Code (0-8 bytes)
-  uint8_t data[8];  // Data payload
-};
-```
-
-### 5. Sending a Frame
+### 4. Sending a Frame
 ```cpp
 bool sendFrame(CAN_Frame &frame);
 ```
-Returns `true` on successful transmission.
+Returns `true` if the frame was successfully transmitted and acknowledged. Returns `false` if arbitration was lost, no acknowledgement was received, or the node is in a Bus-Off state.
 
-### 6. Receiving a Frame
+### 5. Reading a Frame (Non-Blocking)
 ```cpp
-bool receiveFrame(CAN_Frame &frame);
+CAN_Read_Status readFrame(CAN_Frame &frame);
 ```
-This is a blocking function that waits for a new frame to arrive. It returns `true` when a valid frame has been received and its data has been placed in the provided `frame` struct.
+This function must be called frequently in your `loop()`. It returns:
+- `CAN_READ_NO_MSG`: No new message has been received.
+- `CAN_READ_MSG_OK`: A valid message was received and its contents are in the `frame` struct.
+- `CAN_READ_ERROR`: A frame was detected but contained an error (e.g., bad CRC).
 
 ---
 
-## Full Examples
+## Full Examples (Non-Blocking)
 
 ### Sender Sketch (`Sender.ino`)
 ```cpp
 #include <ESP_CAN.h>
 
-// Define the pins for CAN communication
-const int CAN_RX_PIN = 5;  // Not used for sending, but required by library
+const int CAN_RX_PIN = 5;
 const int CAN_TX_PIN = 4;
-
-// Initialize our CAN library
 ESP_CAN can(CAN_RX_PIN, CAN_TX_PIN);
 
 void setup() {
   Serial.begin(115200);
   Serial.println("CAN Sender Initialized");
-
-  // Start CAN communication at 125 kbps
   can.begin(125000);
   delay(1000);
 }
 
 void loop() {
-  // 1. Create a CAN frame
   CAN_Frame txFrame;
-
-  // 2. Set the frame properties
   txFrame.id = 0x123;
   txFrame.dlc = 4;
   txFrame.data[0] = 0xDE;
@@ -142,15 +114,14 @@ void loop() {
   txFrame.data[2] = 0xBE;
   txFrame.data[3] = 0xEF;
 
-  // 3. Send the frame
-  Serial.println("Sending CAN frame...");
+  Serial.println("Attempting to send CAN frame...");
   if (can.sendFrame(txFrame)) {
-    Serial.println("Frame sent successfully!");
+    Serial.println("Frame sent and ACKNOWLEDGED!");
   } else {
-    Serial.println("Failed to send frame.");
+    Serial.printf("Failed to send. Node state: %d, TEC: %d\n", can.state, can.tec);
   }
 
-  delay(2000); // Wait 2 seconds before sending the next frame
+  delay(2000);
 }
 ```
 
@@ -158,28 +129,22 @@ void loop() {
 ```cpp
 #include <ESP_CAN.h>
 
-// Define the pins for CAN communication
 const int CAN_RX_PIN = 5;
-const int CAN_TX_PIN = 4;  // Not used for receiving, but required by library
-
-// Initialize our CAN library
+const int CAN_TX_PIN = 4;
 ESP_CAN can(CAN_RX_PIN, CAN_TX_PIN);
 
 void setup() {
   Serial.begin(115200);
   Serial.println("CAN Receiver Initialized");
-
-  // Start CAN communication at 125 kbps
   can.begin(125000);
   Serial.println("Waiting for CAN frames...");
 }
 
 void loop() {
-  // 1. Create a CAN frame to store incoming data
   CAN_Frame rxFrame;
+  CAN_Read_Status status = can.readFrame(rxFrame);
 
-  // 2. Try to receive a frame
-  if (can.receiveFrame(rxFrame)) {
+  if (status == CAN_READ_MSG_OK) {
     Serial.println("--- Frame Received! ---");
     Serial.printf("ID: 0x%X\n", rxFrame.id);
     Serial.printf("DLC: %d\n", rxFrame.dlc);
@@ -188,21 +153,22 @@ void loop() {
       Serial.printf("0x%02X ", rxFrame.data[i]);
     }
     Serial.println("\n-----------------------\n");
+  } else if (status == CAN_READ_ERROR) {
+    Serial.printf("Frame error detected! REC: %d\n", can.rec);
   }
 }
 ```
 
 ---
 
-## Limitations
-This library is a proof-of-concept and has several major limitations:
--   **No Collision Detection or Arbitration:** If two nodes transmit at the same time, the messages will be corrupted. The library does not monitor the bus while transmitting to detect collisions.
--   **No Error Frames:** It does not generate or handle CAN error frames.
--   **Dummy CRC:** The CRC is a fixed, dummy value. The receiver does not validate it.
--   **Basic ACK:** The sender simply releases the line during the ACK slot but does not check if a receiver actually acknowledged the message.
--   **Blocking Receiver:** The `receiveFrame()` function will halt your program until a message arrives.
+## Advanced Limitations
+While feature-complete in software, this library's reliance on bit-banging has inherent limitations compared to a hardware controller:
+-   **Timing Precision:** The timing is dependent on `micros()` and `delayMicroseconds()`, which can be affected by other code, interrupts, or high CPU load. This can lead to instability, especially at higher baud rates (>125kbps).
+-   **CPU Intensive:** The non-blocking `readFrame()` function must be polled constantly, consuming CPU cycles that could be used for other tasks.
+-   **Limited Arbitration Reliability:** While arbitration logic is implemented, its reliability depends heavily on the timing precision. In a high-traffic scenario, it may not perform as robustly as a hardware-based solution.
 
 ---
+
 
 ## License
 This project has no licensed, because it is a private development with no assurances.
